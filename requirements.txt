@@ -1,6 +1,7 @@
-streamlit
+gradio
 opencv-python-headless
 numpy
 open3d
 pillow
 pandas
+scipy

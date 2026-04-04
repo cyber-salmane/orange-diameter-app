@@ -1,0 +1,20 @@
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).parent
+DB_PATH = BASE_DIR / "admin.db"
+UPLOADS_DIR = BASE_DIR / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "ORANGEADMIN")
+
+MAX_FILE_SIZE_MB = 10
+ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg"}
+
+SESSION_TIMEOUT_HOURS = 24
+MAX_LOGIN_ATTEMPTS = 5
+LOGIN_ATTEMPT_WINDOW_MINUTES = 15
+
+CLEANUP_OLD_FILES_DAYS = 30
+
+EMAIL_VERIFICATION_ENABLED = True

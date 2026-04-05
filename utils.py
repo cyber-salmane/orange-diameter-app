@@ -87,7 +87,7 @@ def is_token_expired(created_at: str, expiry_hours: int = 1) -> bool:
         created = datetime.fromisoformat(created_at)
         expiry = created + timedelta(hours=expiry_hours)
         return datetime.now() > expiry
-    except:
+    except Exception:
         return True
 
 def cleanup_old_files(uploads_dir: Path, days: int):

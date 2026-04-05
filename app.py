@@ -200,7 +200,6 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
             with gr.Column(scale=5):
                 user_greeting = gr.Markdown("")
             with gr.Column(scale=1, min_width=200):
-                gr.Row()
                 with gr.Row():
                     dashboard_btn = gr.Button("📊 Mon tableau de bord", variant="secondary", size="sm")
                     app_logout_btn = gr.Button("🚪 Déconnexion", variant="secondary", size="sm")

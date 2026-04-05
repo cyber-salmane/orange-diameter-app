@@ -15,7 +15,6 @@ from scipy.optimize import least_squares
 
 from config import UPLOADS_DIR
 from db import get_db
-from utils import validate_file, sanitize_filename
 
 logger = logging.getLogger(__name__)
 

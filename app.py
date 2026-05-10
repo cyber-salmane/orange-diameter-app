@@ -166,6 +166,14 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                 login_msg = gr.Markdown("")
                 forgot_password_btn = gr.Button("Mot de passe oublié ?", variant="secondary", size="sm")
 
+                gr.Markdown("---")
+                gr.Markdown("### Vérifier votre adresse e-mail")
+                gr.Markdown("*Collez le code de vérification reçu par e-mail:*")
+                verify_token_input = gr.Textbox(label="Code de vérification", placeholder="Collez le code ici", max_lines=1)
+                verify_token_btn = gr.Button("Vérifier mon e-mail", variant="primary", size="sm")
+                verify_token_msg = gr.Markdown("")
+
+                gr.Markdown("---")
                 gr.Markdown("### Renvoyer l'e-mail de vérification")
                 resend_verification_email_input = gr.Textbox(label="Adresse e-mail", placeholder="email@exemple.com", max_lines=1)
                 resend_verification_btn = gr.Button("Renvoyer l'e-mail de vérification", variant="secondary", size="sm")
@@ -392,6 +400,12 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
             return f"<div class='success-message'>{msg}</div>"
         return f"<div class='error-message'>{msg}</div>"
 
+    def do_verify_token(token):
+        success, msg = verify_email(token)
+        if success:
+            return f"<div class='success-message'>{msg} Vous pouvez maintenant vous connecter.</div>"
+        return f"<div class='error-message'>{msg}</div>"
+
     def do_password_reset_request(email):
         success, msg = request_password_reset(email, "")
         if success:
@@ -402,6 +416,12 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
         fn=do_resend_verification,
         inputs=[resend_verification_email_input],
         outputs=[resend_verification_msg]
+    )
+
+    verify_token_btn.click(
+        fn=do_verify_token,
+        inputs=[verify_token_input],
+        outputs=[verify_token_msg]
     )
 
     reset_request_btn.click(

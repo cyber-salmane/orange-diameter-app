@@ -9,7 +9,9 @@ from config import ADMIN_PASSWORD
 logger = logging.getLogger(__name__)
 
 def verify_admin_password(password: str) -> bool:
-    return password == ADMIN_PASSWORD
+    if not ADMIN_PASSWORD:
+        return False
+    return password.strip() == ADMIN_PASSWORD
 
 def admin_get_users():
     conn = get_db()

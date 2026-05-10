@@ -9,7 +9,6 @@ from PIL import Image
 
 import numpy as np
 import cv2
-import open3d as o3d
 import pandas as pd
 from scipy.optimize import least_squares
 
@@ -18,6 +17,9 @@ from db import get_db
 from utils import validate_file, sanitize_filename
 
 logger = logging.getLogger(__name__)
+
+# Lazy import of open3d to handle headless environments
+o3d = None
 
 def _fix_open3d_system_libs():
     needed = {
@@ -48,9 +50,22 @@ def _fix_open3d_system_libs():
                             pass
                         break
 
-_fix_open3d_system_libs()
+def _ensure_open3d():
+    global o3d
+    if o3d is None:
+        try:
+            _fix_open3d_system_libs()
+            import open3d as _o3d
+            o3d = _o3d
+        except OSError as e:
+            logger.error(f"Failed to import open3d: {e}")
+            logger.error("This typically means libGL.so.1 is missing. In production, install it with:")
+            logger.error("  apt-get install -y libgl1 libglib2.0-0 libsm6 libxrender1 libxext6")
+            raise
+    return o3d
 
 def depth_to_pointcloud(depth, fx, fy, cx, cy):
+    _o3d = _ensure_open3d()
     h, w = depth.shape
     xs, ys = np.meshgrid(np.arange(w), np.arange(h))
     Z = depth
@@ -58,8 +73,8 @@ def depth_to_pointcloud(depth, fx, fy, cx, cy):
     Y = (ys - cy) * Z / fy
     pts = np.stack((X, Y, Z), axis=-1).reshape(-1, 3)
     valid = (Z.reshape(-1) > 0) & (Z.reshape(-1) < 10000)
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts[valid])
+    pcd = _o3d.geometry.PointCloud()
+    pcd.points = _o3d.utility.Vector3dVector(pts[valid])
     return pcd
 
 def remove_multiple_planes(pcd, max_planes=3, distance_threshold=0.002, min_plane_ratio=0.1):
@@ -263,8 +278,9 @@ def process_oranges(
 
             if use_outlier_removal:
                 try:
-                    pcd_c = o3d.geometry.PointCloud()
-                    pcd_c.points = o3d.utility.Vector3dVector(pts)
+                    _o3d = _ensure_open3d()
+                    pcd_c = _o3d.geometry.PointCloud()
+                    pcd_c.points = _o3d.utility.Vector3dVector(pts)
                     cl, _ = pcd_c.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
                     pts = np.asarray(cl.points)
                     if len(pts) < 100:

@@ -74,6 +74,7 @@ pip install -r requirements.txt
 
 ```bash
 export ADMIN_PASSWORD="your-secure-password"
+export APP_BASE_URL="http://localhost:7860"
 ```
 
 ### 3. Run the Application
@@ -82,7 +83,33 @@ export ADMIN_PASSWORD="your-secure-password"
 python3 app.py
 ```
 
-The app will be available at `http://localhost:5000`
+The app will be available at `http://localhost:7860` by default.
+
+### 4. Run Tests
+
+```bash
+pytest
+```
+
+### 5. Build with Docker
+
+```bash
+docker build -t orange-diameter-app .
+docker run --rm -p 7860:7860 orange-diameter-app
+```
+
+### 6. Deploying to Hugging Face Spaces
+
+1. Create a new Space on Hugging Face and choose **Python** + **Gradio**.
+2. Push this repository to the Space.
+3. In the Space settings, add the following secrets:
+   - `APP_BASE_URL=https://<your-space-name>.hf.space`
+   - `SMTP_SERVER`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`
+   - `ADMIN_PASSWORD` (recommended)
+4. The app will build and run automatically.
+5. Open the public Space URL and test registration, email verification, and analysis.
+
+> Note: `APP_BASE_URL` must match your deployed Space URL so email verification links work correctly.
 
 ## First-Time Setup
 
@@ -97,6 +124,8 @@ Edit `config.py` to customize:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `ADMIN_PASSWORD` | "ORANGEADMIN" | Admin panel password |
+| `DB_PATH` | `admin.db` | SQLite database path |
+| `UPLOADS_DIR` | `uploads` | Local upload storage directory |
 | `MAX_FILE_SIZE_MB` | 10 | Maximum upload size |
 | `SESSION_TIMEOUT_HOURS` | 24 | Session expiration time |
 | `CLEANUP_OLD_FILES_DAYS` | 30 | File retention period |

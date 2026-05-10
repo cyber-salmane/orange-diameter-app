@@ -1,12 +1,25 @@
 import hashlib
 import secrets
 import re
+import os
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import logging
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from io import BytesIO
 
-from config import ALLOWED_IMAGE_EXTENSIONS, MAX_FILE_SIZE_MB
+import requests
+from PIL import Image
+
+from config import (
+    ALLOWED_IMAGE_EXTENSIONS, MAX_FILE_SIZE_MB, ALLOWED_IMAGE_MIME_TYPES,
+    SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM_EMAIL,
+    USE_REAL_SMTP, APP_BASE_URL, SENDGRID_API_KEY, SENDGRID_FROM_EMAIL, USE_SENDGRID
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -48,39 +61,159 @@ def validate_file(filename: str, file_size_bytes: int) -> tuple[bool, str]:
     if file_size_bytes > max_bytes:
         return False, f"Fichier trop volumineux. Taille maximale: {MAX_FILE_SIZE_MB}MB"
 
+    try:
+        with Image.open(path) as img:
+            if img.format and img.get_format_mimetype() not in ALLOWED_IMAGE_MIME_TYPES:
+                return False, f"Type de fichier non autorisé. Formats acceptés: {', '.join(ALLOWED_IMAGE_MIME_TYPES)}"
+            img.verify()
+    except Exception:
+        return False, "Le fichier n'est pas une image valide."
+
     return True, ""
+
+
+def is_valid_image(image) -> bool:
+    try:
+        if image is None:
+            return False
+
+        if isinstance(image, Image.Image):
+            buffer = BytesIO()
+            image.save(buffer, format=image.format or "PNG")
+            buffer.seek(0)
+            with Image.open(buffer) as img:
+                return img.format in {"PNG", "JPEG"} and img.get_format_mimetype() in ALLOWED_IMAGE_MIME_TYPES
+
+        if isinstance(image, (bytes, bytearray)):
+            with Image.open(BytesIO(image)) as img:
+                return img.format in {"PNG", "JPEG"} and img.get_format_mimetype() in ALLOWED_IMAGE_MIME_TYPES
+
+        return False
+    except Exception:
+        return False
+
 
 def sanitize_filename(filename: str) -> str:
     path = Path(filename)
     safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', path.stem)
     return f"{safe_name}{path.suffix.lower()}"
 
-def send_verification_email(email: str, token: str):
-    verification_link = f"https://app.example.com/verify?token={token}"
-    logger.info(f"[EMAIL SIMULATION] Sending verification email to {email}")
-    logger.info(f"[EMAIL SIMULATION] Verification link: {verification_link}")
-    print(f"\n{'='*60}")
-    print(f"VERIFICATION EMAIL SIMULATION")
-    print(f"{'='*60}")
-    print(f"To: {email}")
-    print(f"Subject: Vérifiez votre adresse e-mail")
-    print(f"\nCliquez sur ce lien pour vérifier votre compte:")
-    print(f"{verification_link}")
-    print(f"{'='*60}\n")
 
-def send_password_reset_email(email: str, token: str):
-    reset_link = f"https://app.example.com/reset-password?token={token}"
-    logger.info(f"[EMAIL SIMULATION] Sending password reset email to {email}")
-    logger.info(f"[EMAIL SIMULATION] Reset link: {reset_link}")
-    print(f"\n{'='*60}")
-    print(f"PASSWORD RESET EMAIL SIMULATION")
-    print(f"{'='*60}")
-    print(f"To: {email}")
-    print(f"Subject: Réinitialisation de votre mot de passe")
-    print(f"\nCliquez sur ce lien pour réinitialiser votre mot de passe:")
-    print(f"{reset_link}")
-    print(f"Ce lien expire dans 1 heure.")
-    print(f"{'='*60}\n")
+def _build_email_html(title: str, button_text: str, button_url: str, fallback_url: str, message: str) -> str:
+    return f"""<html>
+  <body style='font-family:Arial,Helvetica,sans-serif;background:#f3f4f6;color:#0f172a;margin:0;padding:20px'>
+    <table width='100%' cellpadding='0' cellspacing='0' style='max-width:600px;margin:0 auto;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 20px 50px rgba(15,23,42,0.08)'>
+      <tr style='background:#2563eb;color:#ffffff'>
+        <td style='padding:30px;text-align:center'>
+          <h1 style='margin:0;font-size:24px'>{title}</h1>
+        </td>
+      </tr>
+      <tr>
+        <td style='padding:32px'>
+          <p style='font-size:16px;line-height:1.7;color:#334155'>{message}</p>
+          <div style='text-align:center;margin:32px 0'>
+            <a href='{button_url}' style='display:inline-block;padding:14px 26px;background:#2563eb;color:#ffffff;border-radius:12px;text-decoration:none;font-weight:700'>{button_text}</a>
+          </div>
+          <p style='font-size:14px;line-height:1.7;color:#475569'>Si le bouton ne fonctionne pas, copiez-collez ce lien dans votre navigateur :</p>
+          <p style='font-size:14px;line-height:1.7;color:#2563eb;word-break:break-all'><a href='{fallback_url}'>{fallback_url}</a></p>
+          <p style='font-size:13px;line-height:1.7;color:#64748b;margin-top:28px'>Si vous n'avez pas demandé cette action, vous pouvez ignorer cet e-mail.</p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>"""
+
+
+def _sendgrid_email(to_email: str, subject: str, html: str, text: str) -> tuple[bool, str]:
+    headers = {
+        'Authorization': f'Bearer {SENDGRID_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        'personalizations': [{
+            'to': [{'email': to_email}]
+        }],
+        'from': {'email': SENDGRID_FROM_EMAIL},
+        'subject': subject,
+        'content': [
+            {'type': 'text/plain', 'value': text},
+            {'type': 'text/html', 'value': html}
+        ]
+    }
+    try:
+        response = requests.post('https://api.sendgrid.com/v3/mail/send', headers=headers, json=payload, timeout=15)
+        if response.status_code in (200, 202):
+            logger.info(f"Email sent successfully to {to_email}")
+            return True, ""
+        error_message = response.text.strip() or response.reason
+        logger.error(f"SendGrid error: {response.status_code} {error_message}")
+        return False, f"SendGrid error: {error_message}"
+    except Exception as e:
+        logger.error(f"SendGrid error: {e}")
+        return False, f"SendGrid error: {e}"
+
+
+def _smtp_email(to_email: str, subject: str, html: str, text: str) -> tuple[bool, str]:
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = SMTP_FROM_EMAIL
+        msg['To'] = to_email
+
+        part1 = MIMEText(text, 'plain')
+        part2 = MIMEText(html, 'html')
+        msg.attach(part1)
+        msg.attach(part2)
+
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=15) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        logger.info(f"Email sent successfully to {to_email}")
+        return True, ""
+    except Exception as e:
+        logger.error(f"SMTP error: {e}")
+        return False, f"SMTP error: {e}"
+
+
+def send_email(to_email: str, subject: str, text: str, html: str) -> tuple[bool, str]:
+    if USE_SENDGRID:
+        return _sendgrid_email(to_email, subject, html, text)
+
+    if USE_REAL_SMTP:
+        return _smtp_email(to_email, subject, html, text)
+
+    logger.info(f"[EMAIL SIMULATION] Sending email to {to_email}")
+    logger.info(f"[EMAIL SIMULATION] Subject: {subject}")
+    logger.info(f"[EMAIL SIMULATION] HTML content: {html}")
+    return True, ""
+
+
+def send_verification_email(email: str, token: str) -> tuple[bool, str]:
+    verification_link = f"{APP_BASE_URL}/verify?token={token}"
+    text = f"Cliquez sur ce lien pour vérifier votre compte: {verification_link}\nSi vous n'avez pas demandé cet e-mail, ignorez-le."
+    html = _build_email_html(
+        title="Vérifiez votre adresse e-mail",
+        button_text="Vérifier mon compte",
+        button_url=verification_link,
+        fallback_url=verification_link,
+        message="Cliquez sur le bouton ci-dessous pour vérifier votre adresse e-mail et activer votre compte."
+    )
+    return send_email(email, 'Vérification de votre adresse e-mail', text, html)
+
+
+def send_password_reset_email(email: str, token: str) -> tuple[bool, str]:
+    reset_link = f"{APP_BASE_URL}/reset-password?token={token}"
+    text = f"Cliquez sur ce lien pour réinitialiser votre mot de passe: {reset_link}\nCe lien expire dans 1 heure. Si vous n'avez pas demandé cette action, ignorez cet e-mail."
+    html = _build_email_html(
+        title="Réinitialisation de votre mot de passe",
+        button_text="Réinitialiser mon mot de passe",
+        button_url=reset_link,
+        fallback_url=reset_link,
+        message="Cliquez sur le bouton ci-dessous pour réinitialiser votre mot de passe. Ce lien expire dans 1 heure."
+    )
+    return send_email(email, 'Réinitialisation de votre mot de passe', text, html)
 
 def is_token_expired(created_at: str, expiry_hours: int = 1) -> bool:
     try:

@@ -8,8 +8,9 @@ from config import DB_PATH
 logger = logging.getLogger(__name__)
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
     return conn
 
 def init_db():
@@ -70,11 +71,28 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sessions (
             id          TEXT PRIMARY KEY,
             user_id     TEXT NOT NULL,
-            token       TEXT UNIQUE NOT NULL,
+            token       TEXT UNIQUE,
+            token_hash  TEXT UNIQUE,
             created_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL,
             ip          TEXT,
             FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS registration_attempts (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            ip          TEXT NOT NULL,
+            success     INTEGER NOT NULL,
+            timestamp   TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS password_reset_requests (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            ip          TEXT NOT NULL,
+            success     INTEGER NOT NULL,
+            timestamp   TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts(username);
@@ -82,10 +100,26 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_analyses_user_id ON analyses(user_id);
         CREATE INDEX IF NOT EXISTS idx_uploads_user_id ON uploads(user_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+        CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+        CREATE INDEX IF NOT EXISTS idx_registration_attempts_email ON registration_attempts(email);
+        CREATE INDEX IF NOT EXISTS idx_registration_attempts_timestamp ON registration_attempts(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_requests_email ON password_reset_requests(email);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_requests_timestamp ON password_reset_requests(timestamp);
     """)
     conn.commit()
+    _ensure_db_schema(conn)
     conn.close()
     logger.info("Database initialized successfully")
+
+
+def _ensure_db_schema(conn):
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(sessions)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "token_hash" not in columns:
+        cursor.execute("ALTER TABLE sessions ADD COLUMN token_hash TEXT")
+    conn.commit()
+
 
 def get_user_by_id(user_id: str) -> Optional[Dict]:
     conn = get_db()

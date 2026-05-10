@@ -1,4 +1,5 @@
 import uuid
+import hashlib
 import bcrypt
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict
@@ -12,7 +13,9 @@ from utils import (
 )
 from config import (
     SESSION_TIMEOUT_HOURS, MAX_LOGIN_ATTEMPTS,
-    LOGIN_ATTEMPT_WINDOW_MINUTES, EMAIL_VERIFICATION_ENABLED
+    LOGIN_ATTEMPT_WINDOW_MINUTES, EMAIL_VERIFICATION_ENABLED,
+    MAX_REGISTRATION_ATTEMPTS, REGISTRATION_ATTEMPT_WINDOW_MINUTES,
+    MAX_PASSWORD_RESET_REQUESTS, PASSWORD_RESET_WINDOW_MINUTES
 )
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,41 @@ def verify_password(password: str, hashed: str) -> bool:
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
     except:
         return False
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def _log_action(table: str, email: str, ip: str, success: bool):
+    now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    conn = get_db()
+    try:
+        conn.execute(
+            f"INSERT INTO {table} (id, email, ip, success, timestamp) VALUES (?,?,?,?,?)",
+            (str(uuid.uuid4()), email, ip, 1 if success else 0, now)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _check_rate_limit(table: str, email: str, ip: str, max_attempts: int, window_minutes: int) -> Tuple[bool, str]:
+    now = datetime.now()
+    cutoff = (now - timedelta(minutes=window_minutes)).isoformat(sep=" ", timespec="seconds")
+    conn = get_db()
+    try:
+        attempts = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE (email=? OR ip=?) AND timestamp > ? AND success=0",
+            (email.lower(), ip, cutoff)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    if attempts >= max_attempts:
+        return False, f"Trop de tentatives. Réessayez dans {window_minutes} minutes."
+    return True, ""
+
 
 def check_rate_limit(username: str, ip: str) -> Tuple[bool, str]:
     now = datetime.now()
@@ -59,6 +97,14 @@ def register_user(username: str, email: str, password: str, ip: str) -> Tuple[Op
     if not username or not email or not password:
         return None, "Tous les champs sont obligatoires."
 
+    allowed, msg = _check_rate_limit(
+        "registration_attempts", email, ip,
+        MAX_REGISTRATION_ATTEMPTS,
+        REGISTRATION_ATTEMPT_WINDOW_MINUTES
+    )
+    if not allowed:
+        return None, msg
+
     if not validate_username(username):
         return None, "Nom d'utilisateur invalide (3-30 caractères, lettres/chiffres/-/_ uniquement)."
 
@@ -72,9 +118,11 @@ def register_user(username: str, email: str, password: str, ip: str) -> Tuple[Op
     conn = get_db()
 
     if get_user_by_username(username):
+        _log_action("registration_attempts", email, ip, False)
         return None, f"Le nom d'utilisateur « {username} » est déjà pris."
 
     if get_user_by_email(email):
+        _log_action("registration_attempts", email, ip, False)
         return None, "Cette adresse e-mail est déjà utilisée."
 
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
@@ -94,19 +142,28 @@ def register_user(username: str, email: str, password: str, ip: str) -> Tuple[Op
         conn.commit()
 
         if EMAIL_VERIFICATION_ENABLED and verification_token:
-            send_verification_email(email, verification_token)
+            sent, email_err = send_verification_email(email, verification_token)
+            if not sent:
+                conn.execute("DELETE FROM users WHERE id=?", (uid,))
+                conn.commit()
+                _log_action("registration_attempts", email, ip, False)
+                logger.error(f"Verification email failed, rolled back user {email}: {email_err}")
+                return None, "Impossible d'envoyer l'e-mail de vérification. Réessayez plus tard."
 
+        _log_action("registration_attempts", email, ip, True)
         logger.info(f"New user registered: {username} ({email})")
 
         return {
             "id": uid,
             "username": username,
             "email": email,
-            "needs_verification": EMAIL_VERIFICATION_ENABLED
+            "needs_verification": EMAIL_VERIFICATION_ENABLED,
+            "verification_token": verification_token if EMAIL_VERIFICATION_ENABLED else None
         }, ""
 
     except Exception as e:
         logger.error(f"Error registering user: {e}")
+        _log_action("registration_attempts", email, ip, False)
         return None, "Erreur lors de la création du compte."
     finally:
         conn.close()
@@ -136,6 +193,56 @@ def verify_email(token: str) -> Tuple[bool, str]:
     finally:
         conn.close()
 
+
+def resend_verification_email(email: str, ip: str) -> Tuple[bool, str]:
+    email = email.strip().lower()
+
+    if not validate_email(email):
+        return False, "Adresse e-mail invalide."
+
+    user = get_user_by_email(email)
+    if not user:
+        return False, "Aucun compte trouvé pour cette adresse e-mail."
+
+    if user["is_verified"]:
+        return False, "Ce compte est déjà vérifié."
+
+    new_token = generate_token()
+    sent, email_err = send_verification_email(email, new_token)
+    if not sent:
+        logger.error(f"SendGrid error: {email_err}")
+        return False, "Impossible d'envoyer l'e-mail de vérification. Réessayez plus tard."
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "UPDATE users SET verification_token=?, last_seen=? WHERE id=?",
+            (new_token, datetime.now().isoformat(sep=' ', timespec='seconds'), user['id'])
+        )
+        conn.commit()
+        logger.info(f"Verification email resent to {email}")
+        return True, "L'e-mail de vérification a été renvoyé. Vérifiez votre boîte de réception."
+    except Exception as e:
+        logger.error(f"Error updating verification token for {email}: {e}")
+        return False, "Une erreur est survenue lors du renvoi de l'e-mail."
+    finally:
+        conn.close()
+
+
+def cleanup_unverified_accounts(hours: int = 24) -> int:
+    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat(sep=' ', timespec='seconds')
+    conn = get_db()
+    deleted = conn.execute(
+        "DELETE FROM users WHERE is_verified=0 AND created_at < ?",
+        (cutoff,)
+    ).rowcount
+    conn.commit()
+    conn.close()
+    if deleted > 0:
+        logger.info(f"Deleted {deleted} unverified account(s) older than {hours} hours")
+    return deleted
+
+
 def login_user(username: str, password: str, ip: str) -> Tuple[Optional[Dict], str]:
     username = username.strip()
 
@@ -159,6 +266,7 @@ def login_user(username: str, password: str, ip: str) -> Tuple[Optional[Dict], s
         return None, "Votre compte a été suspendu par un administrateur."
 
     if EMAIL_VERIFICATION_ENABLED and not user["is_verified"]:
+        log_login_attempt(username, ip, False)
         logger.info(f"Unverified user attempted login: {username}")
         return None, "Veuillez vérifier votre adresse e-mail avant de vous connecter."
 
@@ -181,11 +289,12 @@ def create_session(user_id: str, ip: str) -> str:
     now = datetime.now()
     expires = now + timedelta(hours=SESSION_TIMEOUT_HOURS)
     token = generate_token()
+    token_hash = hash_token(token)
 
     conn = get_db()
     conn.execute(
-        "INSERT INTO sessions (id, user_id, token, created_at, expires_at, ip) VALUES (?,?,?,?,?,?)",
-        (str(uuid.uuid4()), user_id, token,
+        "INSERT INTO sessions (id, user_id, token, token_hash, created_at, expires_at, ip) VALUES (?,?,?,?,?,?,?)",
+        (str(uuid.uuid4()), user_id, token, token_hash,
          now.isoformat(sep=" ", timespec="seconds"),
          expires.isoformat(sep=" ", timespec="seconds"), ip)
     )
@@ -199,12 +308,13 @@ def validate_session(token: str) -> Optional[Dict]:
         return None
 
     now = datetime.now().isoformat(sep=" ", timespec="seconds")
+    token_hash = hash_token(token)
     conn = get_db()
     row = conn.execute(
         """SELECT s.user_id, u.username, u.email, u.is_banned
            FROM sessions s JOIN users u ON s.user_id = u.id
-           WHERE s.token=? AND s.expires_at > ?""",
-        (token, now)
+           WHERE (s.token_hash=? OR s.token=?) AND s.expires_at > ?""",
+        (token_hash, token, now)
     ).fetchone()
     conn.close()
 
@@ -220,15 +330,24 @@ def validate_session(token: str) -> Optional[Dict]:
         "email": row["email"]
     }
 
-def request_password_reset(email: str) -> Tuple[bool, str]:
+def request_password_reset(email: str, ip: str) -> Tuple[bool, str]:
     email = email.strip().lower()
 
     if not validate_email(email):
         return False, "Adresse e-mail invalide."
 
+    allowed, msg = _check_rate_limit(
+        "password_reset_requests", email, ip,
+        MAX_PASSWORD_RESET_REQUESTS,
+        PASSWORD_RESET_WINDOW_MINUTES
+    )
+    if not allowed:
+        return False, msg
+
     user = get_user_by_email(email)
 
-    if not user:
+    if not user or (EMAIL_VERIFICATION_ENABLED and not user['is_verified']):
+        _log_action("password_reset_requests", email, ip, True)
         return True, "Si cette adresse e-mail existe, un lien de réinitialisation a été envoyé."
 
     token = generate_token()
@@ -242,12 +361,21 @@ def request_password_reset(email: str) -> Tuple[bool, str]:
         )
         conn.commit()
 
-        send_password_reset_email(email, token)
+        sent, email_err = send_password_reset_email(email, token)
+        if not sent:
+            conn.execute("DELETE FROM password_resets WHERE token=?", (token,))
+            conn.commit()
+            _log_action("password_reset_requests", email, ip, False)
+            logger.error(f"Password reset email failed for {email}: {email_err}")
+            return False, "Impossible d'envoyer l'e-mail de réinitialisation. Réessayez plus tard."
+
+        _log_action("password_reset_requests", email, ip, True)
         logger.info(f"Password reset requested for: {email}")
 
         return True, "Si cette adresse e-mail existe, un lien de réinitialisation a été envoyé."
     except Exception as e:
         logger.error(f"Error creating password reset: {e}")
+        _log_action("password_reset_requests", email, ip, False)
         return False, "Erreur lors de la demande de réinitialisation."
     finally:
         conn.close()

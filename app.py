@@ -5,6 +5,8 @@ from datetime import datetime
 
 import gradio as gr
 import pandas as pd
+from starlette.requests import Request
+from starlette.responses import HTMLResponse
 
 from config import UPLOADS_DIR, CLEANUP_OLD_FILES_DAYS, EMAIL_VERIFICATION_ENABLED
 from db import (
@@ -13,7 +15,8 @@ from db import (
 )
 from auth import (
     register_user, login_user, verify_email, request_password_reset,
-    reset_password, create_session, validate_session, update_user_ip
+    reset_password, create_session, validate_session, resend_verification_email,
+    cleanup_unverified_accounts
 )
 from processing import process_oranges
 from admin import (
@@ -32,6 +35,7 @@ logger = logging.getLogger(__name__)
 init_db()
 cleanup_expired_sessions()
 cleanup_old_login_attempts()
+cleanup_unverified_accounts(hours=24)
 cleanup_old_files(UPLOADS_DIR, CLEANUP_OLD_FILES_DAYS)
 
 custom_css = """
@@ -162,6 +166,11 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                 login_msg = gr.Markdown("")
                 forgot_password_btn = gr.Button("Mot de passe oublié ?", variant="secondary", size="sm")
 
+                gr.Markdown("### Renvoyer l'e-mail de vérification")
+                resend_verification_email_input = gr.Textbox(label="Adresse e-mail", placeholder="email@exemple.com", max_lines=1)
+                resend_verification_btn = gr.Button("Renvoyer l'e-mail de vérification", variant="secondary", size="sm")
+                resend_verification_msg = gr.Markdown("")
+
             with gr.Tab("Créer un compte"):
                 gr.Markdown("### Créez votre compte gratuit")
                 reg_username = gr.Textbox(label="Nom d'utilisateur", placeholder="votre_nom", max_lines=1)
@@ -172,6 +181,7 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                     gr.Markdown("**Note:** Un e-mail de vérification sera envoyé à votre adresse.")
                 reg_btn = gr.Button("Créer mon compte", variant="primary", size="lg")
                 reg_msg = gr.Markdown("")
+
 
             with gr.Tab("Réinitialiser mot de passe"):
                 gr.Markdown("### Réinitialisez votre mot de passe")
@@ -204,6 +214,8 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                 with gr.Row():
                     dashboard_btn = gr.Button("📊 Mon tableau de bord", variant="secondary", size="sm")
                     app_logout_btn = gr.Button("🚪 Déconnexion", variant="secondary", size="sm")
+
+        verification_banner = gr.Markdown("", visible=False)
 
         with gr.Tabs() as main_tabs:
             with gr.Tab("🔬 Analyser"):
@@ -328,16 +340,12 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
 
         admin_logout_btn = gr.Button("🔓 Se déconnecter de l'admin", variant="secondary", size="sm")
 
-    def do_login(username, password, request: gr.Request):
+    def do_login(username, password):
         ip = ""
-        try:
-            ip = request.client.host if request and request.client else ""
-        except:
-            pass
-
         user, err = login_user(username, password, ip)
         if err:
-            return None, gr.update(visible=True), gr.update(visible=False), f"<div class='error-message'>{err}</div>", ""
+            print(f"DEBUG: login error: {err}")
+            return None, gr.update(visible=True), gr.update(visible=False), f"<div class='error-message'>{err}</div>", "", gr.update(value="", visible=False)
 
         token = create_session(user["id"], ip)
         greeting = f"<div style='padding:0.5rem;background:#f0fdf4;border:1px solid #86efac;border-radius:8px'>Connecté en tant que <strong>{user['username']}</strong></div>"
@@ -346,36 +354,27 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                 gr.update(visible=False),
                 gr.update(visible=True),
                 "",
-                greeting)
+                greeting,
+                gr.update(value="", visible=False))
 
-    login_btn.click(
-        fn=do_login,
-        inputs=[login_username, login_password],
-        outputs=[session_token, auth_screen, main_app, login_msg, user_greeting]
-    )
-
-    def do_register(username, email, password, confirm, request: gr.Request):
+    def do_register(username, email, password, confirm):
         ip = ""
-        try:
-            ip = request.client.host if request and request.client else ""
-        except:
-            pass
-
+        
         if password != confirm:
-            return None, gr.update(visible=True), gr.update(visible=False), \
+            return None, gr.update(visible=True), gr.update(visible=False), gr.update(selected=1), \
                    "<div class='error-message'>Les mots de passe ne correspondent pas.</div>", ""
 
         user, err = register_user(username, email, password, ip)
         if err:
-            return None, gr.update(visible=True), gr.update(visible=False), f"<div class='error-message'>{err}</div>", ""
+            return None, gr.update(visible=True), gr.update(visible=False), gr.update(selected=1), f"<div class='error-message'>{err}</div>", ""
 
         if user.get("needs_verification"):
             msg = f"""<div class='success-message'>
                 <strong>Compte créé avec succès!</strong><br>
                 Un e-mail de vérification a été envoyé à <strong>{email}</strong>.<br>
-                Veuillez vérifier votre boîte de réception (et vos spams) avant de vous connecter.
+                Cliquez sur le lien dans votre boîte de réception pour activer votre compte.
             </div>"""
-            return None, gr.update(visible=True), gr.update(visible=False), msg, ""
+            return None, gr.update(visible=True), gr.update(visible=False), gr.update(selected=0), msg, ""
 
         token = create_session(user["id"], ip)
         greeting = f"<div style='padding:0.5rem;background:#f0fdf4;border:1px solid #86efac;border-radius:8px'>Bienvenue <strong>{user['username']}</strong>!</div>"
@@ -383,20 +382,27 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
         return (token,
                 gr.update(visible=False),
                 gr.update(visible=True),
+                gr.update(selected=0),
                 "",
                 greeting)
 
-    reg_btn.click(
-        fn=do_register,
-        inputs=[reg_username, reg_email, reg_password, reg_confirm],
-        outputs=[session_token, auth_screen, main_app, reg_msg, user_greeting]
-    )
-
-    def do_password_reset_request(email):
-        success, msg = request_password_reset(email)
+    def do_resend_verification(email):
+        success, msg = resend_verification_email(email, "")
         if success:
             return f"<div class='success-message'>{msg}</div>"
         return f"<div class='error-message'>{msg}</div>"
+
+    def do_password_reset_request(email):
+        success, msg = request_password_reset(email, "")
+        if success:
+            return f"<div class='success-message'>{msg}</div>"
+        return f"<div class='error-message'>{msg}</div>"
+
+    resend_verification_btn.click(
+        fn=do_resend_verification,
+        inputs=[resend_verification_email_input],
+        outputs=[resend_verification_msg]
+    )
 
     reset_request_btn.click(
         fn=do_password_reset_request,
@@ -404,44 +410,41 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
         outputs=[reset_request_msg]
     )
 
+
     def do_password_reset_confirm(token, new_password):
         success, msg = reset_password(token, new_password)
         if success:
-            return f"<div class='success-message'>{msg}</div>"
-        return f"<div class='error-message'>{msg}</div>"
+            return gr.update(selected=0), f"<div class='success-message'>{msg}</div>"
+        return gr.update(selected=3), f"<div class='error-message'>{msg}</div>"
 
     reset_confirm_btn.click(
         fn=do_password_reset_confirm,
         inputs=[reset_token, reset_new_password],
-        outputs=[reset_confirm_msg]
+        outputs=[auth_tabs, reset_confirm_msg]
     )
 
+    # Login and register event handlers
+    login_btn.click(fn=do_login, inputs=[login_username, login_password], outputs=[session_token, auth_screen, main_app, login_msg, user_greeting, verification_banner])
+    reg_btn.click(fn=do_register, inputs=[reg_username, reg_email, reg_password, reg_confirm], outputs=[session_token, auth_screen, main_app, auth_tabs, reg_msg, user_greeting])
+
     def do_app_logout():
-        return None, gr.update(visible=True), gr.update(visible=False), "", False, \
+        return None, gr.update(visible=True), gr.update(visible=False), "", gr.update(value="", visible=False), False, \
                gr.update(visible=False), gr.update(visible=False)
 
     app_logout_btn.click(
         fn=do_app_logout,
         inputs=[],
-        outputs=[session_token, auth_screen, main_app, user_greeting,
-                 admin_authenticated, admin_login_group, admin_dashboard]
+        outputs=[session_token, auth_screen, main_app, user_greeting, verification_banner, admin_authenticated, admin_login_group, admin_dashboard]
     )
 
     def do_process(rgb_img, depth_img, fx, fy, cx, cy, depth_scale,
                    plane_threshold, max_planes, dbscan_eps, dbscan_min_points,
                    ransac_iterations, ransac_threshold,
-                   use_optimization, use_outlier_removal, token, request: gr.Request):
+                   use_optimization, use_outlier_removal, token):
 
         user = validate_session(token)
         if not user:
-            return None, None, "<div class='error-message'>Session expirée. Veuillez vous reconnecter.</div>", "", None
-
-        try:
-            ip = request.client.host if request and request.client else ""
-            if ip:
-                update_user_ip(user["id"], ip)
-        except:
-            pass
+            return None, None, "<div class='error-message'>Session expirée. Veuillez vous reconnecter.</div>", ""
 
         status_msg = "<div class='info-box'>⏳ Analyse en cours, veuillez patienter...</div>"
 
@@ -458,7 +461,7 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
         else:
             status_msg = "<div class='error-message'>❌ L'analyse a échoué. Vérifiez vos images.</div>"
 
-        return annotated, df, summary, status_msg, df
+        return annotated, df, summary, status_msg
 
     process_btn.click(
         fn=do_process,
@@ -466,20 +469,31 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
                 plane_threshold, max_planes, dbscan_eps, dbscan_min_points,
                 ransac_iterations, ransac_threshold,
                 use_optimization, use_outlier_removal, session_token],
-        outputs=[output_image, results_table, summary_text, process_status, gr.State()]
+        outputs=[output_image, results_table, summary_text, process_status]
     )
 
     def export_to_csv(df, token):
         user = validate_session(token)
-        if not user or df is None or df.empty:
+        if not user:
+            return "<div class='error-message'>Session expirée.</div>"
+        if df is None or (isinstance(df, dict) and not df.get('data')):
             return "<div class='error-message'>Aucune donnée à exporter.</div>"
 
         try:
             export_path = UPLOADS_DIR / f"export_{user['username']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            if isinstance(df, dict):
+                df = pd.DataFrame(df['data'], columns=df['headers'])
             df.to_csv(export_path, index=False)
             return f"<div class='success-message'>✅ Export réussi: {export_path.name}</div>"
         except Exception as e:
-            return f"<div class='error-message'>❌ Erreur lors de l'export: {e}</div>"
+            logger.error(f"Export error for {user['username']}: {e}")
+            return f"<div class='error-message'>❌ Erreur lors de l'export: {str(e)}</div>"
+
+    export_btn.click(
+        fn=export_to_csv,
+        inputs=[results_table, session_token],
+        outputs=[export_msg]
+    )
 
     def show_dashboard(token):
         user = validate_session(token)
@@ -550,11 +564,15 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
     )
 
     def do_admin_login(pwd, current_auth):
-        if verify_admin_password(pwd):
-            s = admin_get_stats()
-            return (True,
-                    gr.update(visible=False), gr.update(visible=True), "",
-                    admin_stats_html(s), admin_get_users(), admin_get_uploads_df(), admin_get_images_list())
+        pwd = pwd.strip() if pwd else ""
+        try:
+            if verify_admin_password(pwd):
+                s = admin_get_stats()
+                return (True,
+                        gr.update(visible=False), gr.update(visible=True), "",
+                        admin_stats_html(s), admin_get_users(), admin_get_uploads_df(), admin_get_images_list())
+        except Exception as e:
+            logger.error(f"Admin login error: {e}")
         return (current_auth, gr.update(visible=True), gr.update(visible=False),
                 "<div class='error-message'>Code incorrect.</div>",
                 gr.update(), gr.update(), gr.update(), gr.update())
@@ -613,18 +631,77 @@ with gr.Blocks(title="Mesure Oranges - Production", theme=gr.themes.Soft(), css=
     ban_btn.click(fn=ban_fn, inputs=[ban_id_input], outputs=[ban_result, users_table])
     unban_btn.click(fn=unban_fn, inputs=[ban_id_input], outputs=[ban_result, users_table])
 
-_dev_domain = os.environ.get("REPLIT_DEV_DOMAIN", "")
-if not _dev_domain:
-    _prod_domains = os.environ.get("REPLIT_DOMAINS", "")
-    _root_path = f"https://{_prod_domains.split(',')[0].strip()}" if _prod_domains else ""
-else:
-    _root_path = ""
+def verify_route(request: Request):
+    token = request.query_params.get("token", "")
+    if not token:
+        content = "<div class='error-message'>Token de vérification manquant.</div>"
+    else:
+        success, msg = verify_email(token)
+        if success:
+            content = f"<div class='success-message'>{msg}</div>"
+        else:
+            content = f"<div class='error-message'>{msg}</div>"
+
+    html = f"""
+<html>
+  <head>
+    <title>Vérification du compte</title>
+    <style>
+      body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #111827; padding: 3rem; }}
+      .box {{ max-width: 640px; margin: auto; background: white; border-radius: 16px; box-shadow: 0 20px 50px rgba(15, 23, 42, 0.08); padding: 2rem; }}
+      a.button {{ display: inline-block; margin-top: 1rem; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border-radius: 999px; text-decoration: none; }}
+    </style>
+  </head>
+  <body>
+    <div class='box'>
+      <h1>Vérification du compte</h1>
+      {content}
+      <a class='button' href='/'>Retour à l'application</a>
+    </div>
+  </body>
+</html>
+"""
+    return HTMLResponse(html)
+
+
+def reset_password_route(request: Request):
+    token = request.query_params.get("token", "")
+    if token:
+        content = f"<div class='info-box'>Utilisez ce token pour réinitialiser votre mot de passe dans l'application :</div>\n<pre style='padding:1rem;background:#f3f4f6;border-radius:8px;overflow-x:auto'>{token}</pre>\n<a class='button' href='/'>Retour à l'application</a>"
+    else:
+        content = "<div class='error-message'>Token de réinitialisation manquant.</div>\n<a class='button' href='/'>Retour à l'application</a>"
+
+    html = f"""
+<html>
+  <head>
+    <title>Réinitialisation du mot de passe</title>
+    <style>
+      body {{ font-family: Arial, sans-serif; background: #f8fafc; color: #111827; padding: 3rem; }}
+      .box {{ max-width: 640px; margin: auto; background: white; border-radius: 16px; box-shadow: 0 20px 50px rgba(15, 23, 42, 0.08); padding: 2rem; }}
+      pre {{ background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }}
+      a.button {{ display: inline-block; margin-top: 1rem; padding: 0.75rem 1.25rem; background: #4f46e5; color: white; border-radius: 999px; text-decoration: none; }}
+    </style>
+  </head>
+  <body>
+    <div class='box'>
+      <h1>Réinitialisation du mot de passe</h1>
+      {content}
+    </div>
+  </body>
+</html>
+"""
+    return HTMLResponse(html)
+
+
+demo.app.add_route("/verify", verify_route, methods=["GET"])
+demo.app.add_route("/reset-password", reset_password_route, methods=["GET"])
 
 if __name__ == "__main__":
     logger.info("Starting Orange Measurement Application...")
     demo.launch(
         server_name="0.0.0.0",
-        server_port=5000,
-        root_path=_root_path,
+        server_port=int(os.environ.get("PORT", "7860")),
+        share=False,
+        root_path=os.environ.get("ROOT_PATH", None),
         allowed_paths=["uploads"],
     )

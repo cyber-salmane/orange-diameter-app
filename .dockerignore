@@ -1,0 +1,14 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache
+.env
+admin.db
+uploads/
+app.pid
+app_run.log
+node_modules/
+.python-version

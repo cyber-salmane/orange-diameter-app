@@ -1,0 +1,16 @@
+nohup: ignoring input
+2026-04-05 19:02:54,113 - db - INFO - Database initialized successfully
+2026-04-05 19:02:54,302 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/telemetry/gradio/initiated "HTTP/1.1 200 OK"
+2026-04-05 19:02:54,750 - __main__ - INFO - Starting Orange Measurement Application...
+2026-04-05 19:02:54,884 - httpx - INFO - HTTP Request: GET https://api.gradio.app/pkg-version "HTTP/1.1 200 OK"
+2026-04-05 19:02:54,904 - httpx - INFO - HTTP Request: GET http://localhost:5000/gradio_api/startup-events "HTTP/1.1 200 OK"
+2026-04-05 19:02:54,931 - httpx - INFO - HTTP Request: HEAD http://localhost:5000/ "HTTP/1.1 200 OK"
+2026-04-05 19:02:55,025 - httpx - INFO - HTTP Request: HEAD https://huggingface.co/api/telemetry/gradio/launched "HTTP/1.1 200 OK"
+2026-04-05 19:04:48,331 - auth - INFO - Email verified for user: verify@example.com
+2026-04-05 19:04:48,708 - auth - INFO - Successful login: verifyuser from 
+2026-04-05 19:08:23,937 - auth - WARNING - Failed login attempt for testuser from 
+2026-04-05 19:08:38,123 - utils - INFO - [EMAIL SIMULATION] Sending verification email to u864031@example.com
+2026-04-05 19:08:38,123 - utils - INFO - [EMAIL SIMULATION] Verification link: https://app.example.com/verify?token=9q4gmki8fFvloo25tb33-rZT08h6ZCMkwXlzcvv7xEI
+2026-04-05 19:08:38,123 - auth - INFO - New user registered: u864031 (u864031@example.com)
+2026-04-05 19:09:00,243 - auth - INFO - Email verified for user: test@example.com
+2026-04-05 19:09:29,434 - auth - INFO - Successful login: activeuser from 

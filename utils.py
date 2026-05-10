@@ -191,26 +191,28 @@ def send_email(to_email: str, subject: str, text: str, html: str) -> tuple[bool,
 
 
 def send_verification_email(email: str, token: str) -> tuple[bool, str]:
-    verification_link = f"{APP_BASE_URL}/verify?token={token}"
-    text = f"Cliquez sur ce lien pour vérifier votre compte: {verification_link}\nSi vous n'avez pas demandé cet e-mail, ignorez-le."
+    verification_link = f"/verify?token={token}"
+    fallback_full_link = f"{APP_BASE_URL}/verify?token={token}"
+    text = f"Cliquez sur ce lien pour vérifier votre compte: {fallback_full_link}\nSi vous n'avez pas demandé cet e-mail, ignorez-le."
     html = _build_email_html(
         title="Vérifiez votre adresse e-mail",
         button_text="Vérifier mon compte",
-        button_url=verification_link,
-        fallback_url=verification_link,
+        button_url=fallback_full_link,
+        fallback_url=fallback_full_link,
         message="Cliquez sur le bouton ci-dessous pour vérifier votre adresse e-mail et activer votre compte."
     )
     return send_email(email, 'Vérification de votre adresse e-mail', text, html)
 
 
 def send_password_reset_email(email: str, token: str) -> tuple[bool, str]:
-    reset_link = f"{APP_BASE_URL}/reset-password?token={token}"
-    text = f"Cliquez sur ce lien pour réinitialiser votre mot de passe: {reset_link}\nCe lien expire dans 1 heure. Si vous n'avez pas demandé cette action, ignorez cet e-mail."
+    reset_link = f"/reset-password?token={token}"
+    fallback_full_link = f"{APP_BASE_URL}/reset-password?token={token}"
+    text = f"Cliquez sur ce lien pour réinitialiser votre mot de passe: {fallback_full_link}\nCe lien expire dans 1 heure. Si vous n'avez pas demandé cette action, ignorez cet e-mail."
     html = _build_email_html(
         title="Réinitialisation de votre mot de passe",
         button_text="Réinitialiser mon mot de passe",
-        button_url=reset_link,
-        fallback_url=reset_link,
+        button_url=fallback_full_link,
+        fallback_url=fallback_full_link,
         message="Cliquez sur le bouton ci-dessous pour réinitialiser votre mot de passe. Ce lien expire dans 1 heure."
     )
     return send_email(email, 'Réinitialisation de votre mot de passe', text, html)
